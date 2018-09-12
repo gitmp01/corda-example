@@ -5,17 +5,16 @@ import it.oraclize.cordapi.OraclizeUtils
 import it.oraclize.cordapi.entities.Answer
 import it.oraclize.cordapi.entities.ProofType
 import it.oraclize.cordapi.flows.OraclizeQueryAwaitFlow
+import it.oraclize.cordapi.flows.OraclizeSignFlow
 import net.corda.core.contracts.*
-import net.corda.core.flows.FlowException
-import net.corda.core.flows.FlowLogic
-import net.corda.core.flows.InitiatingFlow
-import net.corda.core.flows.StartableByRPC
+import net.corda.core.flows.*
 import net.corda.core.identity.AbstractParty
 import net.corda.core.identity.Party
 import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.transactions.TransactionBuilder
 import net.corda.core.utilities.ProgressTracker
+import java.util.function.Predicate
 import javax.xml.transform.TransformerConfigurationException
 
 
@@ -50,14 +49,28 @@ class ExampleFlow : FlowLogic<SignedTransaction>() {
 
         progressTracker.currentStep = CREATING_TRANSACTION
         val notary = serviceHub.networkMapCache.notaryIdentities.first()
+        val oracle = OraclizeUtils.getPartyNode(serviceHub)
+
         val builder = TransactionBuilder(notary)
+        builder.addCommand(Command(answer, listOf(oracle.owningKey, ourIdentity.owningKey)))
+        builder.addOutputState(SomeState(10, ourIdentity), SomeContract.CONTRACT_ID)
 
-
+        builder.verify(serviceHub)
 
         progressTracker.currentStep = GATHERING_SIGNATURES
+        val onceSigned = serviceHub.signInitialTransaction(builder)
+
+        val filtering = OraclizeUtils()::filtering
+        val ftx = builder.toWireTransaction(serviceHub)
+                .buildFilteredTransaction(Predicate { filtering(oracle.owningKey, it) })
+
+        val oracleSignature = subFlow(OraclizeSignFlow(ftx))
+
+        val fullSigned = onceSigned + oracleSignature
 
         progressTracker.currentStep = FINALIZING_TRANSACTION
 
+        return subFlow(FinalityFlow(fullSigned))
     }
 }
 
@@ -68,9 +81,8 @@ data class SomeState(val amount: Int, val owner: Party) : ContractState {
 
 
 class SomeContract : Contract {
-
-    interface Commands {
-        class SomeCommand : Commands, TypeOnlyCommandData()
+    companion object {
+        val CONTRACT_ID = "it.oraclize.corda.SomeContract"
     }
 
     override fun verify(tx: LedgerTransaction)  = requireThat {
